@@ -47,7 +47,7 @@ class RecommenderTrainer:
                  gamma: float = 0.9,
                  tau: float = 0.005,
                  actor_lr: float = 1e-6,
-                 critic_lr: float = 1e-5,
+                 critic_lr: float = 1e-4,
                  batch_size: int = 64,
                  state_size: int = 10,
                  device: torch.device = torch.device('cpu'),
