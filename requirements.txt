@@ -208,3 +208,4 @@ widgetsnbextension==4.0.14
 wrapt==2.0.0
 xlrd==2.0.2
 flwr==1.13.0
+google-cloud-storage

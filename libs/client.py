@@ -55,6 +55,11 @@ class Client:
         self.split_ratios = split_ratios
         
         # Leer y procesar los datos
+        self.load_user_data(path)
+
+    def load_user_data(self, path: str):
+        """Carga los datos de un usuario específico."""
+        self.path = path
         self.df = pd.read_csv(path)
         self._ensure_temporal_order()
         self.all_items = self._process_data()
@@ -65,8 +70,8 @@ class Client:
         self.val_items = []
         self.split_indices = None
         
-        if split_ratios is not None:
-            self._create_splits(split_ratios)
+        if self.split_ratios is not None:
+            self._create_splits(self.split_ratios)
     
     def _ensure_temporal_order(self):
         """Asegura que los datos estén ordenados temporalmente."""
