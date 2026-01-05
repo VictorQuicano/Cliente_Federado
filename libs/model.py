@@ -6,6 +6,7 @@ from .recommender import Recommender
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import torch.nn.functional as F
 import numpy as np
 from typing import List, Dict, Any, Optional, Tuple
 import copy
@@ -152,9 +153,17 @@ class RecommenderTrainer:
                             dtype=torch.float32).to(self.device).unsqueeze(1)
         dones = torch.tensor([b['done'] for b in batch], 
                             dtype=torch.float32).to(self.device).unsqueeze(1)
-        next_states = torch.cat([b['next_state'] if b['next_state'] is not None 
-                                else torch.zeros_like(b['state']) 
-                                for b in batch]).to(self.device)
+        
+        # Obtener next_states (puede ser None)
+        next_states_list = []
+        for b in batch:
+            if b['next_state'] is not None:
+                next_states_list.append(b['next_state'])
+            else:
+                # Crear tensor de ceros del mismo tamaño que state
+                next_states_list.append(torch.zeros_like(b['state']))
+        
+        next_states = torch.cat(next_states_list).to(self.device)
         
         with torch.no_grad():
             # 1. Obtener acciones para los siguientes estados
@@ -163,20 +172,20 @@ class RecommenderTrainer:
             # 2. Calcular valores Q para los siguientes estados
             next_q_values = self.critic_target(next_states, next_actions)
             
-            # 3. Calcular target Q-values (Q-learning con estados terminales)
+            # 3. Calcular target Q-values
             target_q_values = rewards + (1 - dones) * self.gamma * next_q_values
         
         # 4. Calcular valores Q actuales
         current_q_values = self.critic(states, actions)
         
-        # 5. Calcular pérdida (MSE entre Q actual y target)
+        # 5. Calcular pérdida
         critic_loss = nn.MSELoss()(current_q_values, target_q_values)
         
         # 6. Optimizar
         self.critic_optimizer.zero_grad()
         critic_loss.backward()
         
-        # 7. Clip de gradientes (opcional pero recomendado)
+        # 7. Clip de gradientes
         torch.nn.utils.clip_grad_norm_(self.critic.parameters(), max_norm=1.0)
         
         self.critic_optimizer.step()

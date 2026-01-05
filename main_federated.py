@@ -1,37 +1,77 @@
 import logging
-# Configurar logging PRIMERO
+import os
+import argparse
+from typing import Dict, Tuple, List, Optional
+from collections import OrderedDict
+import copy
+
+import torch
+import numpy as np
+import requests
+from dotenv import load_dotenv
+import flwr as fl
+
+# Importaciones locales (asegurarse de que libs esté en el path)
+from libs.client import Client, SplitType
+from libs.model import ContextAwareActor, ContextAwareCritic, Recommender, RecommenderTrainer
+
+# Configurar logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.StreamHandler(),  # Para mostrar en consola
-        logging.FileHandler('cliente_federado.log')  # Opcional: guardar en archivo
+        logging.StreamHandler(),
+        logging.FileHandler('cliente_federado.log')
     ]
 )
-
 logger = logging.getLogger(__name__)
-
-import torch
-import numpy as np
-from libs.client import Client, SplitType
-from libs.model import ContextAwareActor, ContextAwareCritic, Recommender, RecommenderTrainer
-import os
-from dotenv import load_dotenv
-from typing import Dict, Tuple, List, Optional
-import flwr as fl
-from collections import OrderedDict
-import copy
 
 load_dotenv()
 
-
-
+# Constantes por defecto
 USER_ID = "user_55239"
 SELECTED_USER_COMPLETE_PATH = f"/mnt/ssd/Carrera/5th_Year/X_SEMESTER/PFC_3/Dataset/processed_users/{USER_ID}_processed.csv"
 EMBEDDING_DIM = 64
 
 API_URL = os.getenv("API_URL")
 EMBEDDING_URL = f"{API_URL}/info"
+MONITORING_API = "http://localhost:8083"
+
+class MonitoringClient:
+    def __init__(self, api_url=MONITORING_API):
+        self.api_url = api_url
+    
+    def send_heartbeat(self, user_id: str, status: str, current_round: int = 0, session_id: int = None):
+        try:
+            payload = {
+                "user_id": user_id, 
+                "status": status,
+                "current_round": current_round
+            }
+            if session_id:
+                payload["session_id"] = session_id
+                
+            requests.post(
+                f"{self.api_url}/client/heartbeat",
+                json=payload,
+                timeout=1
+            )
+        except Exception:
+            pass # No bloquear si falla el monitoreo
+
+    def log_metrics(self, session_id: int, user_id: str, round_num: int, metrics: Dict):
+        try:
+            requests.post(
+                f"{self.api_url}/training/{session_id}/client/metrics",
+                json={
+                    "user_id": user_id,
+                    "round_number": round_num,
+                    "metrics": metrics
+                },
+                timeout=1
+            )
+        except Exception:
+            pass
 
 class DDPGFlowerClient(fl.client.NumPyClient):
     def __init__(
@@ -53,6 +93,9 @@ class DDPGFlowerClient(fl.client.NumPyClient):
         self.device = torch.device(device)
         self.embedding_cache = embedding_cache
         self.embeddings_path = embeddings_path
+        
+        self.monitor = MonitoringClient()
+        self.monitor.send_heartbeat(user_id, "IDLE")
         
         # Inicializar componentes del modelo DDPG
         self.actor = None
@@ -91,6 +134,8 @@ class DDPGFlowerClient(fl.client.NumPyClient):
             return torch.zeros(self.embedding_dim, dtype=torch.float32)
         
         # Inicializar cliente de datos
+        self.monitor.send_heartbeat(self.user_id, "LOADING_DATA")
+        logging.info(f"Cargando datos desde {self.data_path}")
         self.client_data = Client(
             path=self.data_path,
             recompensa_func=calcular_recompensa_normalizada,
@@ -161,10 +206,16 @@ class DDPGFlowerClient(fl.client.NumPyClient):
         
         # Sincronizar modelos target para entrenamiento estable
         if self.recommender_trainer:
-            self.recommender_trainer.sync_targets()
+            self.recommender_trainer._soft_update_targets()
     
     def fit(self, parameters: List[np.ndarray], config: Dict) -> Tuple[List[np.ndarray], int, Dict]:
         """Entrenar el modelo localmente"""
+        # Extraer info de monitoreo
+        session_id = config.get("session_id", -1)
+        server_round = config.get("server_round", 1)
+        
+        self.monitor.send_heartbeat(self.user_id, "TRAINING", server_round, session_id)
+        
         # Establecer parámetros globales
         self.set_parameters(parameters, config)
         
@@ -177,21 +228,37 @@ class DDPGFlowerClient(fl.client.NumPyClient):
         logging.info(f"Iniciando entrenamiento local para usuario {self.user_id} - {local_epochs} épocas")
         
         # Entrenar localmente
+        # history es un dict con listas de métricas (definido en RecommenderTrainer)
         history = self.recommender_trainer.train(
             num_epochs=local_epochs,
             epsilon_start=epsilon_start,
             epsilon_end=epsilon_end,
             epsilon_decay=epsilon_decay,
             eval_freq=1,
-            save_path=None  # No guardar durante entrenamiento federado
+            save_path=None,  # No guardar durante entrenamiento federado
+            print_logs=True
         )
         
-        # Obtener métricas locales
-        # Obtener métricas locales (asegurando llaves correctas)
+        # Obtener métricas para reportar (tomamos el último valor de la época)
+        # Nota: history["critic_loss"] es una lista de floats
+        # history["val_metrics"] es un defaultdict(list)
+        
+        train_loss = 0.0
+        if history.get("critic_loss"):
+            train_loss = float(history["critic_loss"][-1])
+            
+        actor_loss = 0.0
+        if history.get("actor_loss"):
+            actor_loss = float(history["actor_loss"][-1])
+            
+        val_reward = 0.0
+        if history.get("val_metrics") and history["val_metrics"].get("avg_reward"):
+            val_reward = float(history["val_metrics"]["avg_reward"][-1])
+        
         local_metrics = {
-            "train_loss": float(history.get("critic_loss", [0])[-1]),
-            "actor_loss": float(history.get("actor_loss", [0])[-1]),
-            "val_reward": float(history.get("val_metrics", {}).get("avg_reward", [0])[-1]),
+            "train_loss": train_loss,
+            "actor_loss": actor_loss,
+            "val_reward": val_reward,
             "user_id": self.user_id,
             "samples_trained": len(self.client_data.train_items) if self.client_data else 0
         }
@@ -199,29 +266,34 @@ class DDPGFlowerClient(fl.client.NumPyClient):
         # Obtener parámetros actualizados
         updated_params = self.get_parameters(config)
         
+        # Reportar métricas completas al monitor
+        if session_id != -1:
+            self.monitor.log_metrics(session_id, self.user_id, server_round, history)
+            
+        self.monitor.send_heartbeat(self.user_id, "IDLE", server_round, session_id)
+        
         return updated_params, local_metrics["samples_trained"], local_metrics
     
     def evaluate(self, parameters: List[np.ndarray], config: Dict) -> Tuple[float, int, Dict]:
         """Evaluar el modelo localmente"""
+        # Extraer info de monitoreo
+        session_id = config.get("session_id", -1)
+        server_round = config.get("server_round", 1)
+        
+        self.monitor.send_heartbeat(self.user_id, "EVALUATING", server_round, session_id)
+        
         # Establecer parámetros globales
         self.set_parameters(parameters, config)
         
         logging.info(f"Evaluando modelo para usuario {self.user_id}")
         
         try:
-            # Realizar evaluación (ajusta según tu implementación de RecommenderTrainer)
-            # Si tu RecommenderTrainer tiene un método evaluate, úsalo aquí
             eval_metrics = {}
-            
-            # Si no hay método evaluate, puedes crear uno simple
+            # Usar el método evaluate del entrenador si existe
             if hasattr(self.recommender_trainer, 'evaluate'):
-                eval_metrics = self.recommender_trainer.evaluate()
+                eval_metrics = self.recommender_trainer.evaluate(split_type=SplitType.VALIDATION)
             else:
-                # Evaluación simple basada en datos de validación
-                eval_metrics = {
-                    "val_reward": 0.0,
-                    "loss": 0.0
-                }
+                eval_metrics = {"avg_reward": 0.0}
             
             # Métricas para el servidor
             server_metrics = {
@@ -232,8 +304,15 @@ class DDPGFlowerClient(fl.client.NumPyClient):
                 "samples_evaluated": len(self.client_data.val_items) if self.client_data else 0
             }
             
-            # Usar recompensa de validación como métrica principal
-            loss = 1.0 - server_metrics["val_reward"]  # Convertir recompensa a pérdida
+            # Usar recompensa de validación como métrica principal para la pérdida
+            # (Flower minimiza la pérdida, así que 1 - reward es una buena proxy)
+            loss = 1.0 - server_metrics["val_reward"]
+            
+            # Reportar métricas
+            if session_id != -1:
+                self.monitor.log_metrics(session_id, self.user_id, server_round, server_metrics)
+            
+            self.monitor.send_heartbeat(self.user_id, "IDLE", server_round, session_id)
             
             return float(loss), server_metrics["samples_evaluated"], server_metrics
             
@@ -242,28 +321,20 @@ class DDPGFlowerClient(fl.client.NumPyClient):
             return 1.0, 0, {"error": str(e)}
 
 def get_client_fn(data_paths: Dict[str, str]):
-    """Función de fábrica para crear clientes"""
+    """Función de fábrica para crear clientes (opcional si se usa con Simulation)"""
     def client_fn(cid: str) -> fl.client.Client:
         user_id = f"user_{cid}"
         data_path = data_paths.get(user_id, data_paths.get("default"))
-        
-        if not data_path:
-            raise ValueError(f"No se encontró ruta de datos para usuario {user_id}")
-        
         return DDPGFlowerClient(
             user_id=user_id,
             data_path=data_path,
             embedding_dim=EMBEDDING_DIM,
-            local_epochs=5,  # Épocas por ronda federada
-            batch_size=32
+            local_epochs=5
         ).to_client()
-    
     return client_fn
 
 # Script principal para ejecutar el cliente
 if __name__ == "__main__":
-    import argparse
-    
     parser = argparse.ArgumentParser(description="Cliente Federado DDPG")
     parser.add_argument("--server-address", type=str, default="127.0.0.1:8080",
                        help="Dirección del servidor Flower")
@@ -279,11 +350,10 @@ if __name__ == "__main__":
                        default="/mnt/ssd/Carrera/Datasets/Music4all-Onion/music_4_all_compress_64.csv",
                        help="Ruta al CSV con todos los embeddings")
 
-
     args = parser.parse_args()
     
-    logging.basicConfig(level=logging.INFO)
-    logger.info("Iniciando cliente federado...")
+    logger.info(f"Iniciando cliente federado para {args.user_id}...")
+    
     # Crear instancia del cliente
     client = DDPGFlowerClient(
         user_id=args.user_id,
@@ -295,9 +365,10 @@ if __name__ == "__main__":
         embeddings_path=args.embeddings_path
     )
     
-    # Iniciar cliente Flower
-    logging.info(f"Conectando cliente {args.user_id} a {args.server_address}")
-    fl.client.start_numpy_client(
+    logger.info(f"Conectando cliente {args.user_id} a {args.server_address}")
+    
+    # Iniciar cliente Flower usando start_client (moderno) en lugar de start_numpy_client (deprecado)
+    fl.client.start_client(
         server_address=args.server_address,
-        client=client
+        client=client.to_client()
     )

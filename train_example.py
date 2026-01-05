@@ -47,7 +47,9 @@ client = Client(
     recompensa_func=calcular_recompensa_normalizada,
     get_embedding_func=ejemplo_get_embedding,
     batch_size=32,
-    split_ratios=(0.7, 0.15, 0.15)
+    split_ratios=(0.7, 0.15, 0.15),
+    cache_path="cache_client.json",
+    embeddings_path="/mnt/ssd/Carrera/Datasets/Music4all-Onion/music_4_all_compress_64.csv"
 )
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -55,7 +57,7 @@ logging.info(f"Dispositivo detectado: {DEVICE}")
 
 logging.info("Inicializando modelos ContextAwareActor y ContextAwareCritic...")
 actor = ContextAwareActor(embedding_dim=EMBEDDING_DIM).to(DEVICE)
-critic = ContextAwareCritic(action_dim=64).to(DEVICE)
+critic = ContextAwareCritic(action_dim=EMBEDDING_DIM).to(DEVICE)
 
 logging.info("Configurando Recommender y RecommenderTrainer...")
 recommender = Recommender(client=client)
@@ -70,11 +72,11 @@ recommender_trainer = RecommenderTrainer(
 logging.info("Iniciando entrenamiento...")
 try:
     history = recommender_trainer.train(
-        num_epochs=50,
+        num_epochs=2,
         epsilon_start=0.9,
         epsilon_end=0.1,
         epsilon_decay=0.995,
-        eval_freq=5,
+        eval_freq=1,
         save_path="modelo_recomendacion"
     )
     logging.info("Entrenamiento completado satisfactoriamente.")
