@@ -30,12 +30,23 @@ load_dotenv()
 
 # Constantes por defecto
 USER_ID = "user_55239"
-SELECTED_USER_COMPLETE_PATH = f"/mnt/ssd/Carrera/5th_Year/X_SEMESTER/PFC_3/Dataset/processed_users/{USER_ID}_processed.csv"
 EMBEDDING_DIM = 64
 
-API_URL = os.getenv("API_URL")
-EMBEDDING_URL = f"{API_URL}/info"
-MONITORING_API = "http://localhost:8083"
+USER_HISTORIES_PATH = os.getenv("USER_HISTORIES_PATH", "/mnt/ssd/Carrera/5th_Year/X_SEMESTER/PFC_3/Dataset/processed_users/")
+METADATA_PATH = os.getenv("METADATA_PATH", "/mnt/ssd/Carrera/Datasets/Music4all-Onion/")
+
+
+SELECTED_USER_COMPLETE_PATH = f"{USER_HISTORIES_PATH}/{USER_ID}_processed.csv"
+EMBEDDINGS_PATH = f"{METADATA_PATH}/music_4_all_compress_64.csv"
+
+
+SERVER_IP = os.getenv("SERVER_URL", "http://localhost")
+
+
+
+EMBEDDING_URL = f"{SERVER_IP}:8072/info"
+MONITORING_API = f"{SERVER_IP}:8083"
+SERVER_URL = f"{SERVER_IP}:8080"
 
 class MonitoringClient:
     def __init__(self, api_url=MONITORING_API):
@@ -336,7 +347,7 @@ def get_client_fn(data_paths: Dict[str, str]):
 # Script principal para ejecutar el cliente
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Cliente Federado DDPG")
-    parser.add_argument("--server-address", type=str, default="127.0.0.1:8080",
+    parser.add_argument("--server-address", type=str, default=SERVER_URL,
                        help="Dirección del servidor Flower")
     parser.add_argument("--user-id", type=str, default=USER_ID,
                        help="ID del usuario")
@@ -347,7 +358,7 @@ if __name__ == "__main__":
     parser.add_argument("--embedding-cache", type=str, default="cache_client.json",
                        help="Ruta al archivo de cache de embeddings")
     parser.add_argument("--embeddings-path", type=str, 
-                       default="/mnt/ssd/Carrera/Datasets/Music4all-Onion/music_4_all_compress_64.csv",
+                       default=EMBEDDINGS_PATH,
                        help="Ruta al CSV con todos los embeddings")
 
     args = parser.parse_args()
@@ -367,7 +378,6 @@ if __name__ == "__main__":
     
     logger.info(f"Conectando cliente {args.user_id} a {args.server_address}")
     
-    # Iniciar cliente Flower usando start_client (moderno) en lugar de start_numpy_client (deprecado)
     fl.client.start_client(
         server_address=args.server_address,
         client=client.to_client()
