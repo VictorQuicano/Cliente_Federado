@@ -16,7 +16,7 @@ import argparse
 from datetime import datetime
 
 # Configuración
-API_URL = "http://10.10.0.2:8082/get_user"
+API_URL = "http://10.10.0.2:8081/get_user"
 PYTHON_SCRIPT = "main_federated.py"
 
 # Configurar logging
