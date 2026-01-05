@@ -52,7 +52,7 @@ client = Client(
     embeddings_path="/mnt/ssd/Carrera/Datasets/Music4all-Onion/music_4_all_compress_64.csv"
 )
 
-DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+DEVICE = torch.device('cpu')
 logging.info(f"Dispositivo detectado: {DEVICE}")
 
 logging.info("Inicializando modelos ContextAwareActor y ContextAwareCritic...")

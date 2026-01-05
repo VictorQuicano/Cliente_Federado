@@ -49,7 +49,7 @@ class RecommenderTrainer:
                  gamma: float = 0.9,
                  tau: float = 0.005,
                  actor_lr: float = 1e-6,
-                 critic_lr: float = 1e-4,
+                 critic_lr: float = 1e-3,
                  batch_size: int = 64,
                  state_size: int = 10,
                  device: torch.device = torch.device('cpu'),
@@ -75,7 +75,7 @@ class RecommenderTrainer:
         self.device = device
         self.target_update_freq = target_update_freq
         
-        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=actor_lr, weight_decay=1e-5)
+        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=actor_lr, weight_decay=1e-4)
         self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=critic_lr, weight_decay=1e-6)
         
         self.memory = []
