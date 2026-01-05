@@ -40,12 +40,12 @@ SELECTED_USER_COMPLETE_PATH = f"{USER_HISTORIES_PATH}/{USER_ID}_processed.csv"
 EMBEDDINGS_PATH = f"{METADATA_PATH}/music_4_all_compress_64.csv"
 
 
-SERVER_IP = os.getenv("SERVER_URL", "http://localhost")
+SERVER_IP = os.getenv("SERVER_URL", "127.0.0.1")
 
 
 
-EMBEDDING_URL = f"{SERVER_IP}:8072/info"
-MONITORING_API = f"{SERVER_IP}:8083"
+EMBEDDING_URL = f"http://{SERVER_IP}:8072/info"
+MONITORING_API = f"http://{SERVER_IP}:8083"
 SERVER_URL = f"{SERVER_IP}:8080"
 
 class MonitoringClient:

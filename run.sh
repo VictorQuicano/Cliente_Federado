@@ -11,7 +11,7 @@ if [ $# -ne 1 ]; then
 fi
 
 NUM_VECES=$1
-API_URL="http://34.151.202.191:8082/get_user"
+API_URL="http://10.10.0.2:8082/get_user"
 
 echo "Ejecutando $NUM_VECES veces para la API: $API_URL"
 
