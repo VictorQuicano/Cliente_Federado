@@ -1,14 +1,9 @@
 import pandas as pd
 import torch
-from typing import List, Dict, Any, Optional, Callable, Iterator
-import numpy as np
-#from folders import *
-
-import pandas as pd
-
-import torch
 from typing import List, Dict, Any, Optional, Callable, Iterator, Tuple
 import numpy as np
+import os
+import json
 from dataclasses import dataclass
 from enum import Enum
 
@@ -36,23 +31,31 @@ class Client:
                  get_embedding_func: Callable[[str], torch.Tensor],
                  batch_size: Optional[int] = None,
                  connect_with_server:bool=False,
-                 split_ratios: Optional[Tuple[float, float, float]] = None):
+                 split_ratios: Optional[Tuple[float, float, float]] = None,
+                 cache_path: Optional[str] = None,
+                 embeddings_path: Optional[str] = None):
         """
         Inicializa el cliente para procesar datos de recomendación.
         
         Args:
-            path: Ruta al archivo CSV con los datos
+            path: Ruta al archivo CSV con los datos del usuario
             recompensa_func: Función que calcula la recompensa (count, listened_complete) -> float
             get_embedding_func: Función que obtiene el embedding para un track_id
             batch_size: Tamaño del batch para iteración (opcional)
             split_ratios: Tupla con ratios (train, test, validation). Ej: (0.7, 0.15, 0.15)
                           Si es None, no se divide el dataset
+            cache_path: Ruta al archivo JSON para cachear embeddings.
+            embeddings_path: Ruta al archivo CSV con todos los embeddings (track_id, dim1, dim2, ...).
         """
         self.path = path
         self.recompensa_func = recompensa_func
         self.get_embedding_func = get_embedding_func
         self.batch_size = batch_size
         self.split_ratios = split_ratios
+        self.cache_path = cache_path
+        self.embeddings_path = embeddings_path
+        self.embedding_cache = {}
+        self.cache_updated = False
         
         # Leer y procesar los datos
         self.load_user_data(path)
@@ -61,8 +64,19 @@ class Client:
         """Carga los datos de un usuario específico."""
         self.path = path
         self.df = pd.read_csv(path)
+        
+        # Cargar embeddings desde CSV si se proporciona
+        if self.embeddings_path:
+            self._load_embeddings_from_csv()
+            
+        # Cargar cache de embeddings si existe (puede sobrescribir o complementar)
+        self._load_embedding_cache()
+        
         self._ensure_temporal_order()
         self.all_items = self._process_data()
+        
+        # Guardar cache si hubo actualizaciones
+        self.save_embedding_cache()
         
         # Inicializar splits
         self.train_items = []
@@ -93,46 +107,105 @@ class Client:
                 self.df = self.df.sort_values(available_cols).reset_index(drop=True)
     
     def _process_data(self) -> List[Dict[str, Any]]:
+        """Procesa el DataFrame y crea la lista de ítems con barra de progreso."""
+        from tqdm import tqdm
+        import time
+        import sys
         
-        """Procesa el DataFrame y crea la lista de ítems."""
         items = []
+        total_rows = len(self.df)
+        start_time = time.time()
         
-        for _, row in self.df.iterrows():
-            try:
-                # Obtener embedding del track_id
-                track_id = str(row['track_id'])
-
-                embedding = self.get_embedding_func(track_id)
+        # Estadísticas
+        cache_hits = 0
+        cache_misses = 0
+        errors = 0
+        
+        print(f"\n📊 Iniciando procesamiento de {total_rows:,} filas...")
+        print(f"💾 Cache inicial: {len(self.embedding_cache):,} embeddings")
+        
+        # Usar tqdm para barra de progreso
+        with tqdm(total=total_rows, desc="Procesando datos", 
+                unit="fila", bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]") as pbar:
+            
+            for idx, (_, row) in enumerate(self.df.iterrows(), 1):
+                try:
+                    # Obtener embedding
+                    track_id = str(row['track_id'])
+                    
+                    if track_id in self.embedding_cache:
+                        embedding = self.embedding_cache[track_id]
+                        cache_hits += 1
+                    else:
+                        embedding = self.get_embedding_func(track_id)
+                        self.embedding_cache[track_id] = embedding
+                        self.cache_updated = True
+                        cache_misses += 1
+                    
+                    # Calcular recompensa
+                    count = int(row['interaction_count'])
+                    listened_complete = int(row['interaction_ratio'])
+                    reward = self.recompensa_func(count, listened_complete)
+                    
+                    # Determinar si es día laboral
+                    day_of_week = int(row['day_of_week'])
+                    is_workday = 1 if 0 <= day_of_week <= 4 else 0
+                    
+                    # Crear ítem
+                    item = {
+                        "embedding": embedding,
+                        "context": {
+                            'day_of_week': day_of_week,
+                            'hour_of_day': int(row['hour']),
+                            'is_workday': is_workday,
+                            'month': int(row['month'])
+                        },
+                        "reward": reward,
+                        "track_id": track_id,
+                        "original_row": row.to_dict(),
+                        "temporal_index": idx
+                    }
+                    items.append(item)
+                    
+                    # Actualizar descripción de la barra cada 100 filas
+                    if idx % 100 == 0 or idx == total_rows:
+                        pbar.set_postfix({
+                            'Cache': f'{cache_hits/(cache_hits+cache_misses)*100:.1f}%',
+                            'Errores': errors,
+                            'Items': len(items)
+                        })
+                    
+                except Exception as e:
+                    errors += 1
+                    # Solo mostrar error si es importante (no inundar la consola)
+                    if errors <= 5:  # Mostrar solo los primeros 5 errores
+                        pbar.write(f"⚠️  Error fila {idx}: {str(e)[:100]}...")
+                    continue
                 
-                # Calcular recompensa
-                count = int(row['interaction_count'])
-                listened_complete = int(row['interaction_ratio'])
-
-                reward = self.recompensa_func(count, listened_complete)
-                
-                # Determinar si es día laboral (lunes a viernes = 1, fin de semana = 0)
-                day_of_week = int(row['day_of_week'])
-                is_workday = 1 if 0 <= day_of_week <= 4 else 0  # 0=Lunes, 4=Viernes
-                
-                # Crear ítem
-                item = {
-                    "embedding": embedding,
-                    "context": {
-                        'day_of_week': day_of_week,
-                        'hour_of_day': int(row['hour']),
-                        'is_workday': is_workday,
-                        'month': int(row['month'])
-                    },
-                    "reward": reward,
-                    "track_id": track_id,
-                    "original_row": row.to_dict(),
-                    "temporal_index": _  # Guardar índice temporal
-                }
-                items.append(item)
-                
-            except Exception as e:
-                print(f"Error procesando fila {_}: {e}")
-                continue
+                pbar.update(1)
+        
+        # Resumen final detallado
+        end_time = time.time()
+        total_time = end_time - start_time
+        
+        print(f"\n{'='*60}")
+        print("✅ PROCESAMIENTO COMPLETADO - RESUMEN")
+        print(f"{'='*60}")
+        print(f"📈 Estadísticas:")
+        print(f"   • Total filas: {total_rows:,}")
+        print(f"   • Procesadas exitosamente: {len(items):,} ({len(items)/total_rows*100:.2f}%)")
+        print(f"   • Errores: {errors} ({errors/total_rows*100:.2f}%)")
+        print(f"   • Cache hits: {cache_hits:,} ({cache_hits/(cache_hits+cache_misses)*100:.2f}%)")
+        print(f"   • Cache misses: {cache_misses:,} ({cache_misses/(cache_hits+cache_misses)*100:.2f}%)")
+        print(f"   • Nuevos embeddings: {cache_misses}")
+        print(f"\n⏱️  Tiempos:")
+        print(f"   • Total: {total_time:.2f}s ({total_time/60:.2f}min)")
+        print(f"   • Por fila: {total_time/total_rows*1000:.2f}ms")
+        print(f"   • Velocidad: {total_rows/total_time:.1f} filas/segundo")
+        print(f"\n💾 Cache final: {len(self.embedding_cache):,} embeddings")
+        
+        if errors > 0:
+            print(f"\n⚠️  Se encontraron {errors} errores durante el procesamiento")
         
         return items
     
@@ -474,3 +547,62 @@ class Client:
             
         except ImportError:
             print("Para visualizar la distribución, instala matplotlib: pip install matplotlib")
+
+    def _load_embedding_cache(self):
+        """Carga la cache de embeddings desde el archivo JSON especificado."""
+        if self.cache_path and os.path.exists(self.cache_path):
+            try:
+                with open(self.cache_path, 'r') as f:
+                    cached_data = json.load(f)
+                    # Convertir listas de vuelta a tensores
+                    self.embedding_cache = {
+                        k: torch.tensor(v, dtype=torch.float32) 
+                        for k, v in cached_data.items()
+                    }
+                print(f"Cache de embeddings cargada: {len(self.embedding_cache)} items.")
+            except Exception as e:
+                print(f"Error cargando cache de embeddings: {e}")
+                self.embedding_cache = {}
+
+    def save_embedding_cache(self):
+        """Guarda la cache de embeddings en un archivo JSON."""
+        if self.cache_path and self.cache_updated:
+            try:
+                # Asegurar que el directorio exista
+                os.makedirs(os.path.dirname(os.path.abspath(self.cache_path)), exist_ok=True)
+                
+                # Convertir tensores a listas para serialización JSON
+                serializable_cache = {
+                    k: v.tolist() if isinstance(v, torch.Tensor) else v 
+                    for k, v in self.embedding_cache.items()
+                }
+                
+                with open(self.cache_path, 'w') as f:
+                    json.dump(serializable_cache, f)
+                print(f"Cache de embeddings guardada en {self.cache_path} ({len(self.embedding_cache)} items).")
+                self.cache_updated = False
+            except Exception as e:
+                print(f"Error guardando cache de embeddings: {e}")
+
+    def _load_embeddings_from_csv(self):
+        """Carga embeddings desde un archivo CSV (track_id, dim1, dim2, ...)."""
+        if self.embeddings_path and os.path.exists(self.embeddings_path):
+            try:
+                print(f"⏳ Cargando embeddings desde CSV: {self.embeddings_path}...")
+                # Leer CSV de embeddings
+                emb_df = pd.read_csv(self.embeddings_path)
+                
+                # Primera columna es track_id, el resto son dimensiones
+                track_ids = emb_df.iloc[:, 0].astype(str).values
+                embeddings_matrix = emb_df.iloc[:, 1:].values
+                
+                # Convertir a tensores y guardar en cache
+                for i, track_id in enumerate(track_ids):
+                    self.embedding_cache[track_id] = torch.tensor(
+                        embeddings_matrix[i], 
+                        dtype=torch.float32
+                    )
+                
+                print(f"✅ {len(self.embedding_cache):,} embeddings cargados exitosamente.")
+            except Exception as e:
+                print(f"❌ Error cargando embeddings desde CSV: {e}")

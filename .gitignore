@@ -1,2 +1,5 @@
 libs/__pycache__
 .env
+cache_*.json
+cliente_federado.log
+federated_metrics.json
