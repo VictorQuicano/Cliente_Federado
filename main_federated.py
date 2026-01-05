@@ -363,12 +363,17 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     
+    # Si no se proporciona data-path, construirlo a partir del user-id
+    data_path = args.data_path
+    if data_path == SELECTED_USER_COMPLETE_PATH and args.user_id != USER_ID:
+        data_path = os.path.join(USER_HISTORIES_PATH, f"{args.user_id}_processed.csv")
+    
     logger.info(f"Iniciando cliente federado para {args.user_id}...")
     
     # Crear instancia del cliente
     client = DDPGFlowerClient(
         user_id=args.user_id,
-        data_path=args.data_path,
+        data_path=data_path,
         embedding_dim=args.embedding_dim,
         local_epochs=5,
         batch_size=32,

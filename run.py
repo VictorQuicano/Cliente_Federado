@@ -72,21 +72,11 @@ def execute_federated_script(user_id: str) -> bool:
         if script_dir:
             os.chdir(script_dir)
         
-        # Ejecutar el script
+        # Ejecutar el script permitiendo que los logs fluyan en tiempo real
         result = subprocess.run(
-            [sys.executable, PYTHON_SCRIPT, "--user-id", user_id],
-            capture_output=True,
+            [sys.executable, "-u", PYTHON_SCRIPT, "--user-id", user_id],
             text=True
         )
-        
-        # Mostrar resultados
-        if result.stdout:
-            print("--- Salida del script ---")
-            print(result.stdout)
-        
-        if result.stderr:
-            print("--- Errores del script ---")
-            print(result.stderr)
         
         if result.returncode == 0:
             print(f"✓ Script ejecutado exitosamente")

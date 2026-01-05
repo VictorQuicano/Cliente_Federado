@@ -23,7 +23,8 @@ After=network.target
 Type=simple
 User=$USER
 WorkingDirectory=$WORK_DIR
-ExecStart=$PYTHON_PATH $WORK_DIR/$SCRIPT_NAME 1
+Environment=PYTHONUNBUFFERED=1
+ExecStart=$PYTHON_PATH -u $WORK_DIR/$SCRIPT_NAME 1
 Restart=always
 RestartSec=10
 StandardOutput=append:$WORK_DIR/$SERVICE_NAME.log
