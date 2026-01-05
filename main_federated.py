@@ -40,7 +40,7 @@ SELECTED_USER_COMPLETE_PATH = f"{USER_HISTORIES_PATH}/{USER_ID}_processed.csv"
 EMBEDDINGS_PATH = f"{METADATA_PATH}/music_4_all_compress_64.csv"
 
 
-SERVER_IP = os.getenv("SERVER_URL", "127.0.0.1")
+SERVER_IP = os.getenv("SERVER_URL", "10.10.0.2")
 
 
 
