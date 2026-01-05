@@ -21,7 +21,7 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler('cliente_federado.log')
+        #logging.FileHandler('cliente_federado.log')
     ]
 )
 logger = logging.getLogger(__name__)
