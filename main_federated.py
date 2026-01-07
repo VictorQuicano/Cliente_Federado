@@ -29,14 +29,12 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 # Constantes por defecto
-USER_ID = "user_55239"
 EMBEDDING_DIM = 64
 
-USER_HISTORIES_PATH = os.getenv("USER_HISTORIES_PATH", "/mnt/ssd/Carrera/5th_Year/X_SEMESTER/PFC_3/Dataset/processed_users/")
-METADATA_PATH = os.getenv("METADATA_PATH", "/mnt/ssd/Carrera/Datasets/Music4all-Onion/")
+USER_HISTORIES_PATH = os.getenv("USER_HISTORIES_PATH", "/mnt/shared-storage/data/user_histories/")
+METADATA_PATH = os.getenv("METADATA_PATH", "/mnt/shared-storage/data/music_dataset")
 
 
-SELECTED_USER_COMPLETE_PATH = f"{USER_HISTORIES_PATH}/{USER_ID}_processed.csv"
 EMBEDDINGS_PATH = f"{METADATA_PATH}/music_4_all_compress_64.csv"
 
 
@@ -47,6 +45,7 @@ SERVER_IP = os.getenv("SERVER_URL", "10.10.0.2")
 EMBEDDING_URL = f"http://{SERVER_IP}:8072/info"
 MONITORING_API = f"http://{SERVER_IP}:8083"
 SERVER_URL = f"{SERVER_IP}:8080"
+GET_USE_API = f"http://{SERVER_IP}:8081/get_user"
 
 class MonitoringClient:
     def __init__(self, api_url=MONITORING_API):
@@ -344,14 +343,20 @@ def get_client_fn(data_paths: Dict[str, str]):
         ).to_client()
     return client_fn
 
+def get_client_id():
+    try:
+        response = requests.get(GET_USE_API)
+        if response.status_code == 200:
+            return response.json().get("user_id")
+    except Exception:
+        return None
+
 # Script principal para ejecutar el cliente
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Cliente Federado DDPG")
     parser.add_argument("--server-address", type=str, default=SERVER_URL,
                        help="Dirección del servidor Flower")
-    parser.add_argument("--user-id", type=str, default=USER_ID,
-                       help="ID del usuario")
-    parser.add_argument("--data-path", type=str, default=SELECTED_USER_COMPLETE_PATH,
+    parser.add_argument("--data-path", type=str, default=USER_HISTORIES_PATH,
                        help="Ruta al archivo de datos del usuario")
     parser.add_argument("--embedding-dim", type=int, default=EMBEDDING_DIM,
                        help="Dimensión de los embeddings")
@@ -363,16 +368,18 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     
+    user_id = get_client_id()
+    
     # Si no se proporciona data-path, construirlo a partir del user-id
     data_path = args.data_path
-    if data_path == SELECTED_USER_COMPLETE_PATH and args.user_id != USER_ID:
-        data_path = os.path.join(USER_HISTORIES_PATH, f"{args.user_id}_processed.csv")
+    if data_path == USER_HISTORIES_PATH and user_id:
+        data_path = os.path.join(USER_HISTORIES_PATH, f"{user_id}_processed.csv")
     
-    logger.info(f"Iniciando cliente federado para {args.user_id}...")
+    logger.info(f"Iniciando cliente federado para {user_id}...")
     
     # Crear instancia del cliente
     client = DDPGFlowerClient(
-        user_id=args.user_id,
+        user_id=user_id,
         data_path=data_path,
         embedding_dim=args.embedding_dim,
         local_epochs=5,
