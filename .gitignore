@@ -5,3 +5,5 @@ cliente_federado.log
 federated_metrics.json
 *.pt
 modelo_recomendacion_training_history.json
+metrics/
+metrics_1/

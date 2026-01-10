@@ -38,7 +38,7 @@ EMBEDDINGS_PATH = "https://storage.googleapis.com/recommender-system-datasets-te
 SERVER_IP = os.getenv("SERVER_URL", "10.10.0.2")
 
 
-MONITORING_API = f"http://{SERVER_IP}:8083"
+MONITORING_API = f"http://35.209.90.18:8083"
 SERVER_URL = f"{SERVER_IP}:8080"
 GET_USE_API = f"http://{SERVER_IP}:8081/get_user"
 
