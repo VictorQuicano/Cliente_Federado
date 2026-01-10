@@ -52,7 +52,7 @@ class RecommenderTrainer:
                  critic_lr: float = 1e-3,
                  batch_size: int = 64,
                  state_size: int = 10,
-                 device: torch.device = torch.device('cpu'),
+                 device: torch.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
                  target_update_freq: int = 100):
         
         self.actor = actor.to(device)
@@ -1060,8 +1060,8 @@ class RecommenderTrainer:
             
             epsilon = max(epsilon_end, epsilon * epsilon_decay)
             
-            if save_path and (epoch + 1) % 10 == 0:
-                self.save_model(f"{save_path}_epoch_{epoch+1}.pt")
+            # if save_path and (epoch + 1) % 10 == 0:
+            #     self.save_model(f"{save_path}_epoch_{epoch+1}.pt")
             
             if pbar_t:
                 pbar_t.update(1)
@@ -1070,7 +1070,7 @@ class RecommenderTrainer:
             pbar_t.close()
 
         if save_path:
-            self.save_model(f"{save_path}_final.pt")
+            # self.save_model(f"{save_path}_final.pt")
             self.save_training_history(f"{save_path}_training_history.json")
 
         return self.training_history

@@ -28,7 +28,7 @@ class Client:
     def __init__(self, 
                  path: str, 
                  recompensa_func: Callable[[int, int], float],
-                 get_embedding_func: Callable[[str], torch.Tensor],
+                 get_embedding_func: Optional[Callable[[str], torch.Tensor]] = None,
                  batch_size: Optional[int] = None,
                  connect_with_server:bool=False,
                  split_ratios: Optional[Tuple[float, float, float]] = None,
@@ -136,10 +136,17 @@ class Client:
                     if track_id in self.embedding_cache:
                         embedding = self.embedding_cache[track_id]
                         cache_hits += 1
-                    else:
+                    elif self.get_embedding_func:
                         embedding = self.get_embedding_func(track_id)
                         self.embedding_cache[track_id] = embedding
                         self.cache_updated = True
+                        cache_misses += 1
+                    else:
+                        # Fallback simple si no hay función de embedding: vector de ceros
+                        dim = 64
+                        if len(self.embedding_cache) > 0:
+                            dim = next(iter(self.embedding_cache.values())).shape[0]
+                        embedding = torch.zeros(dim, dtype=torch.float32)
                         cache_misses += 1
                     
                     # Calcular recompensa
@@ -586,7 +593,10 @@ class Client:
 
     def _load_embeddings_from_csv(self):
         """Carga embeddings desde un archivo CSV (track_id, dim1, dim2, ...)."""
-        if self.embeddings_path and os.path.exists(self.embeddings_path):
+        # Verificar si es una ruta local válida o una URL
+        is_url = self.embeddings_path and (self.embeddings_path.startswith('http://') or self.embeddings_path.startswith('https://'))
+        
+        if self.embeddings_path and (os.path.exists(self.embeddings_path) or is_url):
             try:
                 print(f"⏳ Cargando embeddings desde CSV: {self.embeddings_path}...")
                 # Leer CSV de embeddings

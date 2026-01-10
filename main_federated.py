@@ -31,18 +31,13 @@ load_dotenv()
 # Constantes por defecto
 EMBEDDING_DIM = 64
 
-USER_HISTORIES_PATH = os.getenv("USER_HISTORIES_PATH", "/mnt/shared-storage/data/user_histories/")
-METADATA_PATH = os.getenv("METADATA_PATH", "/mnt/shared-storage/data/music_dataset")
 
-
-EMBEDDINGS_PATH = f"{METADATA_PATH}/music_4_all_compress_64.csv"
+EMBEDDINGS_PATH = "https://storage.googleapis.com/recommender-system-datasets-tesis-experiment/music_dataset/music_4_all_compress_64.csv"
 
 
 SERVER_IP = os.getenv("SERVER_URL", "10.10.0.2")
 
 
-
-EMBEDDING_URL = f"http://{SERVER_IP}:8072/info"
 MONITORING_API = f"http://{SERVER_IP}:8083"
 SERVER_URL = f"{SERVER_IP}:8080"
 GET_USE_API = f"http://{SERVER_IP}:8081/get_user"
@@ -128,20 +123,7 @@ class DDPGFlowerClient(fl.client.NumPyClient):
             recompensa = alpha * count_factor + beta * interaction_ratio
             return float(np.clip(recompensa, 0.0, 1.0))
         
-        # Configurar función para obtener embeddings
-        def ejemplo_get_embedding(track_id: str) -> torch.Tensor:
-            try:
-                import requests
-                response = requests.get(
-                    f"{EMBEDDING_URL}/{track_id}?info_type=embedding",
-                    timeout=5
-                )
-                if response.status_code == 200:
-                    embedding = response.json().get("data", {}).get("embedding", [])
-                    return torch.tensor(embedding, dtype=torch.float32)
-            except Exception as e:
-                logging.warning(f"Error obteniendo embedding: {e}")
-            return torch.zeros(self.embedding_dim, dtype=torch.float32)
+
         
         # Inicializar cliente de datos
         self.monitor.send_heartbeat(self.user_id, "LOADING_DATA")
@@ -149,7 +131,7 @@ class DDPGFlowerClient(fl.client.NumPyClient):
         self.client_data = Client(
             path=self.data_path,
             recompensa_func=calcular_recompensa_normalizada,
-            get_embedding_func=ejemplo_get_embedding,
+            # get_embedding_func=None, # Ya no se usa la función, se carga del CSV
             batch_size=self.batch_size,
             split_ratios=(0.7, 0.15, 0.15),
             cache_path=self.embedding_cache,
@@ -236,7 +218,10 @@ class DDPGFlowerClient(fl.client.NumPyClient):
         epsilon_decay = config.get("epsilon_decay", 0.995)
         
         logging.info(f"Iniciando entrenamiento local para usuario {self.user_id} - {local_epochs} épocas")
+        metrics_dir = os.path.join("metrics", str(self.user_id))
+        os.makedirs(metrics_dir, exist_ok=True)
         
+        file_name = os.path.join(metrics_dir, f"round_{server_round}")
         # Entrenar localmente
         # history es un dict con listas de métricas (definido en RecommenderTrainer)
         history = self.recommender_trainer.train(
@@ -245,7 +230,7 @@ class DDPGFlowerClient(fl.client.NumPyClient):
             epsilon_end=epsilon_end,
             epsilon_decay=epsilon_decay,
             eval_freq=1,
-            save_path=None,  # No guardar durante entrenamiento federado
+            save_path=file_name,  # No guardar durante entrenamiento federado
             print_logs=True
         )
         
@@ -356,24 +341,15 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Cliente Federado DDPG")
     parser.add_argument("--server-address", type=str, default=SERVER_URL,
                        help="Dirección del servidor Flower")
-    parser.add_argument("--data-path", type=str, default=USER_HISTORIES_PATH,
-                       help="Ruta al archivo de datos del usuario")
     parser.add_argument("--embedding-dim", type=int, default=EMBEDDING_DIM,
                        help="Dimensión de los embeddings")
-    parser.add_argument("--embedding-cache", type=str, default="cache_client.json",
-                       help="Ruta al archivo de cache de embeddings")
-    parser.add_argument("--embeddings-path", type=str, 
-                       default=EMBEDDINGS_PATH,
-                       help="Ruta al CSV con todos los embeddings")
-
+    
     args = parser.parse_args()
     
     user_id = get_client_id()
     
     # Si no se proporciona data-path, construirlo a partir del user-id
-    data_path = args.data_path
-    if data_path == USER_HISTORIES_PATH and user_id:
-        data_path = os.path.join(USER_HISTORIES_PATH, f"{user_id}_processed.csv")
+    data_path = f"https://storage.googleapis.com/recommender-system-datasets-tesis-experiment/user_histories/{user_id}_processed.csv"
     
     logger.info(f"Iniciando cliente federado para {user_id}...")
     
@@ -384,11 +360,11 @@ if __name__ == "__main__":
         embedding_dim=args.embedding_dim,
         local_epochs=5,
         batch_size=32,
-        embedding_cache=args.embedding_cache,
-        embeddings_path=args.embeddings_path
+        embedding_cache=f"cache_{user_id}.json",
+        embeddings_path=EMBEDDINGS_PATH
     )
     
-    logger.info(f"Conectando cliente {args.user_id} a {args.server_address}")
+    logger.info(f"Conectando cliente {user_id} a {args.server_address}")
     
     fl.client.start_client(
         server_address=args.server_address,
