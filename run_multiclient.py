@@ -5,6 +5,16 @@ import time
 import signal
 import os
 
+def get_gpu_count():
+    """Detecta el número de GPUs disponibles usando nvidia-smi."""
+    try:
+        output = subprocess.check_output(["nvidia-smi", "-L"], encoding="utf-8")
+        lines = [line for line in output.strip().split("\n") if line.strip()]
+        return len(lines)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        print("⚠️ No se pudo detectar nvidia-smi. Se asumirá CPU o configuración manual.")
+        return 0
+
 def main():
     parser = argparse.ArgumentParser(description="Ejecutar múltiples clientes federados simultáneamente.")
     parser.add_argument("-n", "--num_clients", type=int, default=1, help="Número de clientes a ejecutar")
@@ -39,14 +49,29 @@ def main():
 
     print(f"🚀 Iniciando {args.num_clients} instancias de cliente...")
     print(f"📜 Script: {script_path}")
+    
+    num_gpus = get_gpu_count()
+    if num_gpus > 0:
+        print(f"✅ GPUs detectadas: {num_gpus}. Se distribuirán los procesos.")
+    else:
+        print("⚠️ No se detectaron GPUs (o nvidia-smi falló). Los procesos gestionarán su propio dispositivo (probablemente CPU o GPU:0).")
+
     print("Prepara Ctrl+C para detener la ejecución.\n")
 
     try:
         for i in range(args.num_clients):
             print(f"🔸 Lanzando cliente {i+1}/{args.num_clients}...")
+            
+            # Preparar entorno para asignar GPU específica
+            env = os.environ.copy()
+            if num_gpus > 0:
+                gpu_id = i % num_gpus
+                env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+                print(f"   ➤ Asignando CUDA_VISIBLE_DEVICES={gpu_id}")
+
             # Usar subprocess.Popen para lanzar el proceso en "paralelo" (como en otra terminal)
             # sys.executable asegura que usamos el mismo intérprete de Python
-            proc = subprocess.Popen([sys.executable, script_path])
+            proc = subprocess.Popen([sys.executable, script_path], env=env)
             processes.append(proc)
             
             # Pequeña pausa para no saturar el servidor de registro de golpe

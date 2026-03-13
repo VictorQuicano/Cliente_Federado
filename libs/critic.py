@@ -16,12 +16,6 @@ class ContextAwareCritic(nn.Module):
         self.state_dim = state_dim
         self.action_dim = action_dim
         
-        # # print(f"[DEBUG] Critic: state_dim={state_dim}, action_dim={action_dim}")
-        
-        # ====================
-        # CONFIGURACIÓN CRÍTICA
-        # ====================
-        
         # Network 1 (main)
         self.layer1 = nn.Linear(state_dim + action_dim, hidden_dim)
         self.layer2 = nn.Linear(hidden_dim, hidden_dim)
@@ -90,19 +84,7 @@ class ContextAwareCritic(nn.Module):
     def forward(self, state, action, return_min=False):
         """
         Forward con protección contra valores extremos.
-        
-        Args:
-            state: [batch_size, state_dim]
-            action: [batch_size, action_dim]
-            return_min: Si True, retorna el mínimo de las dos redes (como TD3)
-            
-        Returns:
-            q_value: [batch_size, 1] con valores acotados
         """
-        # ====================
-        # 1. VALIDACIÓN DE INPUTS
-        # ====================
-        
         if state.shape[-1] != self.state_dim:
             print(f"[CRITIC ERROR] State dim mismatch: expected {self.state_dim}, "
                   f"got {state.shape[-1]}")
@@ -120,20 +102,12 @@ class ContextAwareCritic(nn.Module):
             print("[CRITIC WARNING] NaN/Inf in action")
             action = torch.nan_to_num(action)
         
-        # ====================
-        # 2. CONCATENAR
-        # ====================
-        
         x = torch.cat([state, action], dim=-1)
         
         # Estadísticas para debugging
         state_stats = f"state: μ={state.mean():.3f}±{state.std():.3f}"
         action_stats = f"action: μ={action.mean():.3f}±{action.std():.3f}"
         x_stats = f"concat: μ={x.mean():.3f}±{x.std():.3f}"
-        
-        # ====================
-        # 3. FORWARD A TRAVÉS DE LA(S) RED(ES)
-        # ====================
         
         if self.use_double_q:
             q1 = self._forward_single_network(x, network_id=1)
@@ -147,16 +121,8 @@ class ContextAwareCritic(nn.Module):
         else:
             q_value = self._forward_single_network(x, network_id=1)
         
-        # ====================
-        # 4. LIMITAR VALORES Q (¡CRÍTICO!)
-        # ====================
-        
         # Clamping para evitar explosión
         q_value = torch.clamp(q_value, -10.0, 10.0)
-        
-        # ====================
-        # 5. DEBUGGING
-        # ====================
         
         if torch.isnan(q_value).any() or torch.isinf(q_value).any():
             print(f"[CRITIC ERROR] NaN/Inf in Q values!")

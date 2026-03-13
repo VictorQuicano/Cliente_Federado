@@ -21,9 +21,6 @@ class ContextAwareActor(nn.Module):
         self.embedding_dim = embedding_dim
         self.hidden_dim = hidden_dim
         
-        # ====================
-        # 1. CONTEXT ENCODERS
-        # ====================
         self.day_embed = nn.Embedding(7, 8)
         self.month_embed = nn.Embedding(12, 8)
         self.workday_embed = nn.Embedding(2, 8)
@@ -31,10 +28,6 @@ class ContextAwareActor(nn.Module):
         # Codificación de hora (8 dimensiones: 4 seno, 4 coseno)
         self.hour_freq = 2 * torch.pi / 24.0
         
-        # ====================
-        # 2. ITEM PROCESSOR - CORREGIDO
-        # ====================
-        # ¡IMPORTANTE! embedding_dim + 32 (8*4 embeddings de contexto)
         self.item_processor_input_dim = embedding_dim + 32
         
         self.item_processor = nn.Sequential(
@@ -44,9 +37,6 @@ class ContextAwareActor(nn.Module):
             nn.Dropout(0.1)
         )
         
-        # ====================
-        # 3. ATTENTION (opcional)
-        # ====================
         self.use_attention = True
         if self.use_attention:
             self.attention = nn.MultiheadAttention(
@@ -57,10 +47,6 @@ class ContextAwareActor(nn.Module):
             )
             self.attn_norm = nn.LayerNorm(hidden_dim)
         
-        # ====================
-        # 4. DECODER - CORREGIDO
-        # ====================
-        # El estado combinado es: hidden_dim (historial) + 32 (último contexto)
         self.decoder_input_dim = hidden_dim + 32
         
         self.decoder = nn.Sequential(
@@ -203,16 +189,7 @@ class ContextAwareActor(nn.Module):
     
     def forward(self, item_embeddings, item_contexts, last_context):
         """Forward con validación robusta"""
-        # ====================
-        # 0. VALIDAR INPUTS
-        # ====================
-        # print(f"[DEBUG forward] item_embeddings shape: {item_embeddings.shape}")
-        # print(f"[DEBUG forward] item_contexts keys: {list(item_contexts.keys())}")
-        # print(f"[DEBUG forward] last_context keys: {list(last_context.keys())}")
         
-        # ====================
-        # 1. PROCESAR ÍTEMS
-        # ====================
         history_rep = self.process_items(item_embeddings, item_contexts)
         
         if history_rep is None:
@@ -221,20 +198,11 @@ class ContextAwareActor(nn.Module):
             batch_size = item_embeddings.shape[0]
             history_rep = torch.zeros(batch_size, self.hidden_dim).to(item_embeddings.device)
         
-        # ====================
-        # 2. CODIFICAR ÚLTIMO CONTEXTO
-        # ====================
         last_context_rep = self.encode_context(last_context)
         
         # Si tiene dimensión extra (seq_len=1), removerla
         if last_context_rep.dim() == 3 and last_context_rep.size(1) == 1:
             last_context_rep = last_context_rep.squeeze(1)
-        
-        # ====================
-        # 3. VALIDAR DIMENSIONES
-        # ====================
-        # print(f"[DEBUG forward] history_rep shape: {history_rep.shape}")
-        # print(f"[DEBUG forward] last_context_rep shape: {last_context_rep.shape}")
         
         if history_rep.shape[-1] != self.hidden_dim:
             print(f"[ERROR] history_rep dim: {history_rep.shape[-1]}, expected {self.hidden_dim}")
@@ -242,13 +210,7 @@ class ContextAwareActor(nn.Module):
         if last_context_rep.shape[-1] != 32:
             print(f"[ERROR] last_context_rep dim: {last_context_rep.shape[-1]}, expected 32")
         
-        # ====================
-        # 4. COMBINAR
-        # ====================
         combined_state = torch.cat([history_rep, last_context_rep], dim=-1)
-        
-        # print(f"[DEBUG forward] combined_state shape: {combined_state.shape}")
-        # print(f"[DEBUG forward] decoder_input_dim: {self.decoder_input_dim}")
         
         if combined_state.shape[-1] != self.decoder_input_dim:
             print(f"[ERROR] State dim mismatch: {combined_state.shape[-1]}, "
@@ -262,12 +224,7 @@ class ContextAwareActor(nn.Module):
                                     ).to(combined_state.device)
                 combined_state = torch.cat([combined_state, padding], dim=-1)
         
-        # ====================
-        # 5. DECODIFICAR
-        # ====================
         next_item_embedding = self.decoder(combined_state)
-        
-        # print(f"[DEBUG forward] next_item_embedding shape: {next_item_embedding.shape}")
         
         return combined_state, next_item_embedding
     
