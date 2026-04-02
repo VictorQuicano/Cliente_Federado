@@ -151,7 +151,7 @@ class Client:
                     
                     # Calcular recompensa
                     count = int(row['interaction_count'])
-                    listened_complete = int(row['interaction_ratio'])
+                    listened_complete = float(row['interaction_ratio'])
                     reward = self.recompensa_func(count, listened_complete)
                     
                     # Determinar si es día laboral

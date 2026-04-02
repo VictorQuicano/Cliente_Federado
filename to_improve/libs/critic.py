@@ -10,11 +10,17 @@ class ContextAwareCritic(nn.Module):
     """
     Crítico estabilizado para DDPG - con protección contra explosión de valores Q
     """
-    def __init__(self, state_dim=288, action_dim=128, hidden_dim=256):
+    def __init__(self, state_dim=288, action_dim=128, hidden_dim=256,
+                 dropout: float = 0.1, init_gain: float = 0.01,
+                 output_init_range: float = 0.003, q_clamp: float = 10.0):
         super().__init__()
-        
+
         self.state_dim = state_dim
         self.action_dim = action_dim
+        self.dropout_rate = dropout
+        self.init_gain = init_gain
+        self.output_init_range = output_init_range
+        self.q_clamp = q_clamp
         
         # Network 1 (main)
         self.layer1 = nn.Linear(state_dim + action_dim, hidden_dim)
@@ -28,7 +34,7 @@ class ContextAwareCritic(nn.Module):
         self.ln3 = nn.LayerNorm(hidden_dim // 2)
         
         # Dropout para regularización
-        self.dropout = nn.Dropout(0.1)
+        self.dropout = nn.Dropout(self.dropout_rate)
         
         # Network 2 (opcional, para Double DQN-style)
         self.use_double_q = True
@@ -47,12 +53,12 @@ class ContextAwareCritic(nn.Module):
     
     def _initialize_weights(self):
         """Inicialización extremadamente conservadora"""
-        gain = 0.01  # ¡Muy pequeño!
+        gain = self.init_gain
         
         for name, module in self.named_modules():
             if isinstance(module, nn.Linear):
                 if 'layer4' in name or 'layer4_2' in name:  # Capa de salida
-                    nn.init.uniform_(module.weight, -0.003, 0.003)
+                    nn.init.uniform_(module.weight, -self.output_init_range, self.output_init_range)
                 else:
                     nn.init.xavier_uniform_(module.weight, gain=gain)
                 nn.init.constant_(module.bias, 0.0)
@@ -122,7 +128,7 @@ class ContextAwareCritic(nn.Module):
             q_value = self._forward_single_network(x, network_id=1)
         
         # Clamping para evitar explosión
-        q_value = torch.clamp(q_value, -10.0, 10.0)
+        q_value = torch.clamp(q_value, -self.q_clamp, self.q_clamp)
         
         if torch.isnan(q_value).any() or torch.isinf(q_value).any():
             print(f"[CRITIC ERROR] NaN/Inf in Q values!")
@@ -132,7 +138,7 @@ class ContextAwareCritic(nn.Module):
             print(f"  Q values before clamp: {q_value}")
             
             # Reemplazar valores inválidos
-            q_value = torch.nan_to_num(q_value, nan=0.0, posinf=10.0, neginf=-10.0)
+            q_value = torch.nan_to_num(q_value, nan=0.0, posinf=self.q_clamp, neginf=-self.q_clamp)
         
         # Logging periódico
         if hasattr(self, 'debug_step') and self.debug_step % 100 == 0:

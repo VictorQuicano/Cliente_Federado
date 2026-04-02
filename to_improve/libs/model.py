@@ -53,19 +53,28 @@ class RecommenderTrainer:
                  batch_size: int = 64,
                  state_size: int = 10,
                  device: torch.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
-                 target_update_freq: int = 100):
-        
+                 target_update_freq: int = 100,
+                 actor_weight_decay: float = 1e-4,
+                 critic_weight_decay: float = 1e-6,
+                 memory_capacity: int = 10_000,
+                 grad_clip_norm: float = 1.0,
+                 actor_noise_scale: float = 0.1,
+                 entropy_coeff: float = 0.01,
+                 max_train_steps: int = 1000,
+                 max_eval_steps: int = 500,
+                 exploration_noise: float = 0.2):
+
         self.actor = actor.to(device)
         self.critic = critic.to(device)
-        
+
         self.actor_target = copy.deepcopy(actor).to(device)
         self.critic_target = copy.deepcopy(critic).to(device)
-        
+
         for param in self.actor_target.parameters():
             param.requires_grad = False
         for param in self.critic_target.parameters():
             param.requires_grad = False
-        
+
         self.client = client
         self.recommender = recommender
         self.gamma = gamma
@@ -74,12 +83,18 @@ class RecommenderTrainer:
         self.state_size = state_size
         self.device = device
         self.target_update_freq = target_update_freq
-        
-        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=actor_lr, weight_decay=1e-4)
-        self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=critic_lr, weight_decay=1e-6)
-        
+        self.grad_clip_norm = grad_clip_norm
+        self.actor_noise_scale = actor_noise_scale
+        self.entropy_coeff = entropy_coeff
+        self.max_train_steps = max_train_steps
+        self.max_eval_steps = max_eval_steps
+        self.default_exploration_noise = exploration_noise
+
+        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=actor_lr, weight_decay=actor_weight_decay)
+        self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=critic_lr, weight_decay=critic_weight_decay)
+
         self.memory = []
-        self.memory_capacity = 10000
+        self.memory_capacity = memory_capacity
         
         
         self.training_history = {
@@ -187,7 +202,7 @@ class RecommenderTrainer:
         critic_loss.backward()
         
         # 7. Clip de gradientes
-        torch.nn.utils.clip_grad_norm_(self.critic.parameters(), max_norm=1.0)
+        torch.nn.utils.clip_grad_norm_(self.critic.parameters(), max_norm=self.grad_clip_norm)
         
         self.critic_optimizer.step()
         
@@ -197,7 +212,7 @@ class RecommenderTrainer:
         states = torch.cat([b['state'] for b in batch]).to(self.device)
         
         # Añadir ruido para exploración (importante en DDPG)
-        noise = torch.randn_like(states) * 0.1
+        noise = torch.randn_like(states) * self.actor_noise_scale
         noisy_states = states + noise
         
         actions = self.actor.forward_from_state(noisy_states)
@@ -208,12 +223,12 @@ class RecommenderTrainer:
         
         # Añadir regularización de entropía
         action_std = actions.std()
-        entropy_regularization = -0.01 * action_std  # Promover diversidad
+        entropy_regularization = -self.entropy_coeff * action_std  # Promover diversidad
         actor_loss += entropy_regularization
         
         self.actor_optimizer.zero_grad()
         actor_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 1.0)
+        torch.nn.utils.clip_grad_norm_(self.actor.parameters(), self.grad_clip_norm)
         self.actor_optimizer.step()
         
         return actor_loss.item()
@@ -225,8 +240,10 @@ class RecommenderTrainer:
         for target_param, param in zip(self.critic_target.parameters(), self.critic.parameters()):
             target_param.data.copy_(self.tau * param.data + (1 - self.tau) * target_param.data)
 
-    def train_epoch(self, epsilon: float = 0.1, max_steps: int = 1000, print_logs: bool = False, 
-                exploration_noise: float = 0.2) -> Dict[str, float]:
+    def train_epoch(self, epsilon: float = 0.1, max_steps: Optional[int] = None, print_logs: bool = False,
+                exploration_noise: Optional[float] = None) -> Dict[str, float]:
+        max_steps = max_steps if max_steps is not None else self.max_train_steps
+        exploration_noise = exploration_noise if exploration_noise is not None else self.default_exploration_noise
         train_items = self.client.get_split(SplitType.TRAIN)
         if not train_items:
             return {}
@@ -351,11 +368,12 @@ class RecommenderTrainer:
             **metrics
         }
 
-    def evaluate(self, split_type: SplitType = SplitType.VALIDATION, 
-                max_steps: int = 500, print_logs: bool = False) -> Dict[str, float]:
+    def evaluate(self, split_type: SplitType = SplitType.VALIDATION,
+                max_steps: Optional[int] = None, print_logs: bool = False) -> Dict[str, float]:
+        max_steps = max_steps if max_steps is not None else self.max_eval_steps
         self.actor.eval()
         self.critic.eval()
-        
+
         eval_items = self.client.get_split(split_type)
         if not eval_items:
             return {}

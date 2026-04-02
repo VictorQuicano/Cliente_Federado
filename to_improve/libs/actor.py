@@ -15,11 +15,15 @@ HIDDEN_DIM = 256
 # ==================== MODELO ACTOR CON CONTEXTO POR ÍTEM ====================
 
 class ContextAwareActor(nn.Module):
-    def __init__(self, embedding_dim=128, hidden_dim=256):
+    def __init__(self, embedding_dim=128, hidden_dim=256, dropout: float = 0.1,
+                 init_gain: float = 0.1, num_heads: int = 4):
         super(ContextAwareActor, self).__init__()
-        
+
         self.embedding_dim = embedding_dim
         self.hidden_dim = hidden_dim
+        self.dropout_rate = dropout
+        self.init_gain = init_gain
+        self.num_heads = num_heads
         
         self.day_embed = nn.Embedding(7, 8)
         self.month_embed = nn.Embedding(12, 8)
@@ -34,16 +38,16 @@ class ContextAwareActor(nn.Module):
             nn.Linear(self.item_processor_input_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.ReLU(),
-            nn.Dropout(0.1)
+            nn.Dropout(self.dropout_rate)
         )
         
         self.use_attention = True
         if self.use_attention:
             self.attention = nn.MultiheadAttention(
                 embed_dim=hidden_dim,
-                num_heads=4,
+                num_heads=self.num_heads,
                 batch_first=True,
-                dropout=0.1
+                dropout=self.dropout_rate
             )
             self.attn_norm = nn.LayerNorm(hidden_dim)
         
@@ -53,25 +57,25 @@ class ContextAwareActor(nn.Module):
             nn.Linear(self.decoder_input_dim, 512),
             nn.LayerNorm(512),
             nn.ReLU(),
-            nn.Dropout(0.1),
-            
+            nn.Dropout(self.dropout_rate),
+
             nn.Linear(512, 256),
             nn.LayerNorm(256),
             nn.ReLU(),
-            nn.Dropout(0.1),
-            
+            nn.Dropout(self.dropout_rate),
+
             nn.Linear(256, embedding_dim),
             nn.Tanh()
         )
         
-        self.dropout = nn.Dropout(0.1)
+        self.dropout = nn.Dropout(self.dropout_rate)
         self._initialize_weights()
     
     def _initialize_weights(self):
         """Inicialización conservadora"""
         for module in self.modules():
             if isinstance(module, nn.Linear):
-                nn.init.xavier_uniform_(module.weight, gain=0.1)
+                nn.init.xavier_uniform_(module.weight, gain=self.init_gain)
                 nn.init.constant_(module.bias, 0.0)
             elif isinstance(module, nn.LayerNorm):
                 nn.init.constant_(module.bias, 0.0)
