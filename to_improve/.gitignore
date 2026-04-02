@@ -1,0 +1,5 @@
+.agents/
+.claude/
+libs/__pycache__/
+__pycache__/
+skill-lock.json
