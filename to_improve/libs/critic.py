@@ -87,68 +87,58 @@ class ContextAwareCritic(nn.Module):
         
         return q_value
     
-    def forward(self, state, action, return_min=False):
+    def forward(self, state, action, return_min=False, return_both=False):
         """
         Forward con protección contra valores extremos.
+        - return_both=True: devuelve (q1, q2) para entrenar ambas redes (TD3 critic update)
+        - return_min=True: devuelve min(q1, q2) para target estimation
+        - default: devuelve q1
         """
         if state.shape[-1] != self.state_dim:
             print(f"[CRITIC ERROR] State dim mismatch: expected {self.state_dim}, "
                   f"got {state.shape[-1]}")
-        
+
         if action.shape[-1] != self.action_dim:
             print(f"[CRITIC ERROR] Action dim mismatch: expected {self.action_dim}, "
                   f"got {action.shape[-1]}")
-        
+
         # Detectar NaN/Inf
         if torch.isnan(state).any() or torch.isinf(state).any():
             print("[CRITIC WARNING] NaN/Inf in state")
             state = torch.nan_to_num(state)
-        
+
         if torch.isnan(action).any() or torch.isinf(action).any():
             print("[CRITIC WARNING] NaN/Inf in action")
             action = torch.nan_to_num(action)
-        
+
         x = torch.cat([state, action], dim=-1)
-        
-        # Estadísticas para debugging
-        state_stats = f"state: μ={state.mean():.3f}±{state.std():.3f}"
-        action_stats = f"action: μ={action.mean():.3f}±{action.std():.3f}"
-        x_stats = f"concat: μ={x.mean():.3f}±{x.std():.3f}"
-        
+
         if self.use_double_q:
             q1 = self._forward_single_network(x, network_id=1)
             q2 = self._forward_single_network(x, network_id=2)
-            
-            # Usar el mínimo para reducir sobreestimación (como en TD3)
+
+            q1 = torch.clamp(q1, -self.q_clamp, self.q_clamp)
+            q2 = torch.clamp(q2, -self.q_clamp, self.q_clamp)
+
+            if torch.isnan(q1).any() or torch.isnan(q2).any():
+                print(f"[CRITIC ERROR] NaN/Inf in Q values! "
+                      f"state: μ={state.mean():.3f}, action: μ={action.mean():.3f}")
+                q1 = torch.nan_to_num(q1, nan=0.0, posinf=self.q_clamp, neginf=-self.q_clamp)
+                q2 = torch.nan_to_num(q2, nan=0.0, posinf=self.q_clamp, neginf=-self.q_clamp)
+
+            if return_both:
+                return q1, q2
             if return_min:
-                q_value = torch.min(q1, q2)
-            else:
-                q_value = q1  # O (q1 + q2) / 2 para promedio
+                return torch.min(q1, q2)
+            return q1
         else:
             q_value = self._forward_single_network(x, network_id=1)
-        
-        # Clamping para evitar explosión
-        q_value = torch.clamp(q_value, -self.q_clamp, self.q_clamp)
-        
-        if torch.isnan(q_value).any() or torch.isinf(q_value).any():
-            print(f"[CRITIC ERROR] NaN/Inf in Q values!")
-            print(f"  {state_stats}")
-            print(f"  {action_stats}")
-            print(f"  {x_stats}")
-            print(f"  Q values before clamp: {q_value}")
-            
-            # Reemplazar valores inválidos
-            q_value = torch.nan_to_num(q_value, nan=0.0, posinf=self.q_clamp, neginf=-self.q_clamp)
-        
-        # Logging periódico
-        if hasattr(self, 'debug_step') and self.debug_step % 100 == 0:
-            print(f"[Critic Debug Step {self.debug_step}]")
-            print(f"  {state_stats}")
-            print(f"  {action_stats}")
-            print(f"  Q range: [{q_value.min():.3f}, {q_value.max():.3f}]")
-            print(f"  Q mean: {q_value.mean():.3f}")
-        
-        return q_value
+            q_value = torch.clamp(q_value, -self.q_clamp, self.q_clamp)
+            if torch.isnan(q_value).any():
+                q_value = torch.nan_to_num(q_value, nan=0.0, posinf=self.q_clamp, neginf=-self.q_clamp)
+            if return_both:
+                return q_value, q_value
+            return q_value
     
     def get_gradient_info(self):
         """Información sobre gradientes para debugging"""

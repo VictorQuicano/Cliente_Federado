@@ -7,62 +7,41 @@ class Recommender:
     def __init__(self, client: Client):
         """
         Inicializa el recomendador con un cliente.
-        
+
         Args:
             client: Instancia de Client que contiene los datos
         """
         self.client = client
-        self.cache = {}  # Cache para resultados de búsqueda por contexto
-        
-    def _compute_dot_product(self, 
-                           action_vector: torch.Tensor, 
-                           items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """
-        Calcula el producto punto entre el vector de acción y los embeddings de los ítems.
-        
-        Args:
-            action_vector: Tensor de tamaño [1, 512] o [512]
-            items: Lista de ítems con embedding
-        
-        Returns:
-            Lista de ítems con score añadido
-        """
-        # Asegurar que el vector de acción tenga la forma correcta
-        if action_vector.dim() == 1:
-            action_vector = action_vector.unsqueeze(0)  # [512] -> [1, 512]
-        
-        # Crear batch de embeddings
-        embeddings_list = []
-        valid_indices = []
-        
-        for i, item in enumerate(items):
-            if 'embedding' in item and item['embedding'] is not None:
-                embedding = item['embedding']
-                # Asegurar que el embedding tenga la forma correcta
-                if embedding.dim() == 1:
-                    embedding = embedding.unsqueeze(0)  # [512] -> [1, 512]
-                embeddings_list.append(embedding)
-                valid_indices.append(i)
-        
-        if not embeddings_list:
-            return []
-        
-        # Apilar embeddings
-        embeddings_tensor = torch.cat(embeddings_list, dim=0)  # [n, 512]
-        
-        # Calcular producto punto
-        # action_vector: [1, 512], embeddings_tensor: [n, 512]
-        # Transponer embeddings_tensor para multiplicación: [512, n]
-        scores = torch.mm(action_vector, embeddings_tensor.t()).squeeze(0)  # [n]
-        
-        # Añadir scores a los ítems válidos
-        result_items = []
-        for idx, score in zip(valid_indices, scores):
-            item_copy = items[idx].copy()
-            item_copy['score'] = float(score)
-            result_items.append(item_copy)
-        
-        return result_items
+        self.cache = {}
+        # Precomputed normalized embedding matrices per split (built lazily)
+        self._embed_cache: Dict[str, torch.Tensor] = {}
+        self._items_cache: Dict[str, List[Dict[str, Any]]] = {}
+
+    def _get_precomputed(self, split_type: SplitType):
+        """Build and cache a normalized embedding matrix + item list for a split."""
+        key = split_type.value
+        if key in self._embed_cache:
+            return self._embed_cache[key], self._items_cache[key]
+
+        items = self.client.get_split(split_type)
+        embeddings = []
+        valid_items = []
+        for item in items:
+            emb = item.get('embedding')
+            if emb is not None and isinstance(emb, torch.Tensor):
+                embeddings.append(emb)
+                valid_items.append(item)
+
+        if not embeddings:
+            self._embed_cache[key] = torch.empty(0)
+            self._items_cache[key] = []
+            return self._embed_cache[key], self._items_cache[key]
+
+        embed_matrix = torch.stack(embeddings)  # [N, dim]
+        embed_norm = torch.nn.functional.normalize(embed_matrix, p=2, dim=-1)
+        self._embed_cache[key] = embed_norm
+        self._items_cache[key] = valid_items
+        return embed_norm, valid_items
     
     def _get_context_key(self, context: Dict[str, Any]) -> str:
         """
@@ -147,47 +126,39 @@ class Recommender:
                 'original_data': dict (opcional)
             }
         """
-        # 1. Buscar ítems por contexto
-        context_items = self.get_context_items(context, split_type, use_cache)
-        
-        if not context_items:
-            print(f"No se encontraron ítems para el contexto: {context}")
+        # 1. Get precomputed normalized embedding matrix for this split
+        embed_norm, valid_items = self._get_precomputed(split_type)
+        if len(valid_items) == 0:
             return []
-        
-        # 2. Calcular scores (producto punto)
-        scored_items = self._compute_dot_product(action_vector, context_items)
-        
-        if not scored_items:
-            print("No se pudieron calcular scores para los ítems")
-            return []
-        
-        # 3. Filtrar por score mínimo si se especifica
-        if min_score is not None:
-            scored_items = [item for item in scored_items if item['score'] >= min_score]
-        
-        # 4. Ordenar por score descendente
-        scored_items.sort(key=lambda x: x['score'], reverse=True)
-        
-        # 5. Retornar resultados
+
+        # 2. Cosine similarity via single matrix multiply (fast)
+        if action_vector.dim() == 1:
+            action_vector = action_vector.unsqueeze(0)
+        action_norm = torch.nn.functional.normalize(action_vector, p=2, dim=-1)
+        scores = torch.mm(action_norm, embed_norm.t()).squeeze(0)  # [N]
+
+        # 3. Use topk to avoid sorting all N items (O(N) vs O(N log N))
+        k = len(valid_items) if return_all else min(n * 2, len(valid_items))  # fetch extra for min_score filter
+        topk_scores, topk_indices = torch.topk(scores, k)
+
+        # 4. Build result list
         result_items = []
-        
-        # Determinar cuántos ítems retornar
-        n_items = len(scored_items) if return_all else min(n, len(scored_items))
-        
-        for i in range(n_items):
-            item = scored_items[i]
-            
-            # Crear resultado con la información requerida
-            result = {
+        for score_val, idx in zip(topk_scores, topk_indices):
+            s = float(score_val)
+            if min_score is not None and s < min_score:
+                continue
+            item = valid_items[int(idx)]
+            result_items.append({
                 'embedding': item.get('embedding'),
-                'score': item.get('score', 0.0),
+                'score': s,
                 'reward': item.get('reward', 0.0),
                 'track_id': item.get('track_id'),
                 'context': item.get('context', {}),
-                'original_data': item.get('original_row', {}) if 'original_row' in item else None
-            }
-            result_items.append(result)
-        
+                'original_data': item.get('original_row') if 'original_row' in item else None,
+            })
+            if not return_all and len(result_items) >= n:
+                break
+
         return result_items
     
     def batch_recommend(self,

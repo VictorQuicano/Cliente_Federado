@@ -59,10 +59,12 @@ class RecommenderTrainer:
                  memory_capacity: int = 10_000,
                  grad_clip_norm: float = 1.0,
                  actor_noise_scale: float = 0.1,
-                 entropy_coeff: float = 0.01,
+                 entropy_coeff: float = 0.3,
                  max_train_steps: int = 1000,
                  max_eval_steps: int = 500,
-                 exploration_noise: float = 0.2):
+                 exploration_noise: float = 0.2,
+                 policy_delay: int = 2,
+                 eval_noise: float = 0.05):
 
         self.actor = actor.to(device)
         self.critic = critic.to(device)
@@ -89,6 +91,10 @@ class RecommenderTrainer:
         self.max_train_steps = max_train_steps
         self.max_eval_steps = max_eval_steps
         self.default_exploration_noise = exploration_noise
+        self.policy_delay = policy_delay
+        self._critic_update_count = 0
+        self.eval_noise = eval_noise
+        self._recent_rec_ids: deque = deque(maxlen=20)
 
         self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=actor_lr, weight_decay=actor_weight_decay)
         self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=critic_lr, weight_decay=critic_weight_decay)
@@ -101,6 +107,7 @@ class RecommenderTrainer:
             'actor_loss': [],
             'critic_loss': [],
             'train_rewards': [],
+            'q_stats': [],
             'train_metrics': defaultdict(list),
             'val_metrics': defaultdict(list),
             'test_metrics': defaultdict(list)
@@ -112,7 +119,7 @@ class RecommenderTrainer:
         recent_items = user_items[-self.state_size:]
         
         if len(recent_items) == 0:
-            return None, None
+            return None, None, None
         
         item_embeddings = []
         item_contexts = {
@@ -184,18 +191,31 @@ class RecommenderTrainer:
         with torch.no_grad():
             # 1. Obtener acciones para los siguientes estados
             next_actions = self.actor_target.forward_from_state(next_states)
-            
-            # 2. Calcular valores Q para los siguientes estados
-            next_q_values = self.critic_target(next_states, next_actions)
+
+            # TD3 target policy smoothing: añadir ruido clipeado a las acciones target.
+            # Evita que el crítico sobreestime Q para acciones específicas del actor,
+            # rompiendo el ciclo de divergencia actor→crítico→actor.
+            target_noise = (torch.randn_like(next_actions) * 0.2).clamp(-0.5, 0.5)
+            next_actions = (next_actions + target_noise).clamp(-1.0, 1.0)
+
+            # 2. Calcular valores Q para los siguientes estados (min of twin Q for TD3)
+            next_q_values = self.critic_target(next_states, next_actions, return_min=True)
             
             # 3. Calcular target Q-values
             target_q_values = rewards + (1 - dones) * self.gamma * next_q_values
         
-        # 4. Calcular valores Q actuales
-        current_q_values = self.critic(states, actions)
-        
-        # 5. Calcular pérdida
-        critic_loss = nn.MSELoss()(current_q_values, target_q_values)
+        # 4. Calcular valores Q actuales para ambas redes (TD3: entrenar Q1 y Q2)
+        current_q1, current_q2 = self.critic(states, actions, return_both=True)
+
+        # 5. Calcular pérdida para ambas redes
+        critic_loss = nn.MSELoss()(current_q1, target_q_values) + nn.MSELoss()(current_q2, target_q_values)
+
+        # Registrar estadísticas de Q para diagnóstico (separadas del actor_loss)
+        self.training_history['q_stats'].append({
+            'target_mean': float(target_q_values.mean()),
+            'target_max': float(target_q_values.max()),
+            'q1_mean': float(current_q1.mean()),
+        })
         
         # 6. Optimizar
         self.critic_optimizer.zero_grad()
@@ -210,20 +230,18 @@ class RecommenderTrainer:
 
     def _update_actor(self, batch: List[Dict]) -> float:
         states = torch.cat([b['state'] for b in batch]).to(self.device)
-        
-        # Añadir ruido para exploración (importante en DDPG)
-        noise = torch.randn_like(states) * self.actor_noise_scale
-        noisy_states = states + noise
-        
-        actions = self.actor.forward_from_state(noisy_states)
+
+        actions = self.actor.forward_from_state(states)
         q_values = self.critic(states, actions)
-        
+
         # Actor loss debería minimizar -Q (maximizar Q)
         actor_loss = -q_values.mean()
-        
-        # Añadir regularización de entropía
-        action_std = actions.std()
-        entropy_regularization = -self.entropy_coeff * action_std  # Promover diversidad
+
+        # Diversidad entre acciones del batch (no dentro de cada acción).
+        # std(dim=0): desviación estándar entre los batch_size vectores, por dimensión.
+        # Si el actor produce el mismo vector para todos los estados → std ≈ 0 → penalización máxima.
+        action_batch_std = actions.std(dim=0).mean()
+        entropy_regularization = -self.entropy_coeff * action_batch_std
         actor_loss += entropy_regularization
         
         self.actor_optimizer.zero_grad()
@@ -247,65 +265,82 @@ class RecommenderTrainer:
         train_items = self.client.get_split(SplitType.TRAIN)
         if not train_items:
             return {}
-        
+
+        # Shuffle each epoch so training sees diverse items instead of the same
+        # sequential slice every time (prevents context/mode collapse)
+        shuffled_items = train_items.copy()
+        np.random.shuffle(shuffled_items)
+
+        # Reset per-epoch diversity deque so penalty doesn't leak across epochs
+        self._recent_rec_ids.clear()
+
         epoch_rewards = []
         epoch_actor_loss = []
         epoch_critic_loss = []
-        
+
         user_history = []
         step = 0
-        
+
         if print_logs:
-            pbar = tqdm(total=min(len(train_items), max_steps), desc="Training")
+            pbar = tqdm(total=min(len(shuffled_items), max_steps), desc="Training")
         else:
             pbar = None
-        
-        for i, item in enumerate(train_items):
+
+        for i, item in enumerate(shuffled_items):
             if step >= max_steps:
                 break
-            
+
             context = item['context']
-            
+
             state_rep = self._prepare_state(user_history, context)
             if state_rep[0] is None:
                 user_history.append(item)
                 continue
-            
+
             item_embeddings, item_contexts, last_context = state_rep
-            
+
             with torch.no_grad():
                 state_vec, action_vec = self.actor(
                     item_embeddings.to(self.device),
                     {k: v.to(self.device) for k, v in item_contexts.items()},
                     {k: v.to(self.device) for k, v in last_context.items()}
                 )
-            
+
             if np.random.random() < epsilon:
                 noise = torch.randn_like(action_vec) * exploration_noise
                 action_vec = action_vec + noise
-                # Normalizar si es necesario
-                action_vec = torch.tanh(action_vec)
-            
+
             recommendations = self.recommender.recommend(
                 action_vector=action_vec.squeeze(0).cpu(),
                 context=context,
                 n=1,
                 split_type=SplitType.TRAIN
             )
-            
+
             if recommendations:
                 recommended = recommendations[0]
-                reward = recommended['reward']
-                recommended_item = {
-                    'embedding': recommended['embedding'],
-                    'context': context,
-                    'reward': reward,
-                    'track_id': recommended['track_id']
-                }
-                
-                next_user_history = user_history + [recommended_item]
+
+                # Reward: cosine similarity between recommendation and ground truth embedding.
+                # 100% action-dependent so the gradient fully reflects the recommendation quality.
+                gt_embedding = item['embedding']
+                rec_embedding = recommended['embedding']
+                cosine_sim = float(torch.nn.functional.cosine_similarity(
+                    gt_embedding.unsqueeze(0), rec_embedding.unsqueeze(0)
+                ))
+                relevance_reward = max(0.0, cosine_sim)
+
+                # Diversity penalty: discourage repeating recently recommended tracks.
+                # Makes the Q function learn that repetition is suboptimal.
+                rec_track_id = recommended.get('track_id')
+                if rec_track_id is not None and rec_track_id in self._recent_rec_ids:
+                    relevance_reward *= 0.7
+                if rec_track_id is not None:
+                    self._recent_rec_ids.append(rec_track_id)
+
+                # Build next state from actual ground truth item (not the recommendation)
+                next_user_history = user_history + [item]
                 next_state_rep = self._prepare_state(next_user_history, context)
-                
+
                 if next_state_rep[0] is not None:
                     next_item_embeddings, next_item_contexts, _ = next_state_rep
                     with torch.no_grad():
@@ -316,16 +351,16 @@ class RecommenderTrainer:
                         )
                 else:
                     next_state_vec = None
-                
+
                 self._add_to_memory(
                     state_vec.cpu(),
                     action_vec.cpu(),
-                    reward,
+                    relevance_reward,
                     next_state_vec.cpu() if next_state_vec is not None else None,
                     done=False
                 )
-                
-                epoch_rewards.append(reward)
+
+                epoch_rewards.append(relevance_reward)
                 user_history = next_user_history
             else:
                 user_history.append(item)
@@ -334,10 +369,13 @@ class RecommenderTrainer:
             batch = self._sample_batch()
             if batch:
                 critic_loss = self._update_critic(batch)
-                actor_loss = self._update_actor(batch)
-                
                 epoch_critic_loss.append(critic_loss)
-                epoch_actor_loss.append(actor_loss)
+
+                # TD3 policy delay: update actor every policy_delay critic steps
+                self._critic_update_count += 1
+                if self._critic_update_count % self.policy_delay == 0:
+                    actor_loss = self._update_actor(batch)
+                    epoch_actor_loss.append(actor_loss)
             
             self.step_count += 1
             if self.step_count % self.target_update_freq == 0:
@@ -381,7 +419,11 @@ class RecommenderTrainer:
         user_history = []
         all_recommendations = []
         step = 0
-        
+        hits_at_1 = 0
+        hits_at_5 = 0
+        hits_at_10 = 0
+        n_queries = 0
+
         if print_logs:
             pbar = tqdm(total=min(len(eval_items), max_steps), desc=f"Evaluating {split_type.value}")
         else:
@@ -391,62 +433,77 @@ class RecommenderTrainer:
             for i, item in enumerate(eval_items):
                 if step >= max_steps:
                     break
-                
+
                 context = item['context']
-                
+
                 state_rep = self._prepare_state(user_history, context)
                 if state_rep[0] is None:
                     user_history.append(item)
                     continue
-                
+
                 item_embeddings, item_contexts, last_context = state_rep
-                
+
                 state_vec, action_vec = self.actor(
                     item_embeddings.to(self.device),
                     {k: v.to(self.device) for k, v in item_contexts.items()},
                     {k: v.to(self.device) for k, v in last_context.items()}
                 )
-                
+
+                # Small eval noise breaks deterministic mode collapse without
+                # invalidating the evaluation — 95% policy, 5% stochastic.
+                if self.eval_noise > 0:
+                    action_vec = action_vec + torch.randn_like(action_vec) * self.eval_noise
+
                 recommendations = self.recommender.recommend(
                     action_vector=action_vec.squeeze(0).cpu(),
                     context=context,
                     n=10,
-                    split_type=split_type,
+                    split_type=SplitType.TRAIN,
                     return_all=False
                 )
-                
+
                 if recommendations:
                     all_recommendations.extend(recommendations)
-                    
-                    recommended = recommendations[0]
-                    recommended_item = {
-                        'embedding': recommended['embedding'],
-                        'context': context,
-                        'reward': recommended['reward'],
-                        'track_id': recommended['track_id']
-                    }
-                    user_history.append(recommended_item)
-                else:
-                    user_history.append(item)
-                
+
+                    # Per-query hit-rate: did we recommend the actual next item?
+                    gt_track_id = item.get('track_id')
+                    if gt_track_id is not None:
+                        n_queries += 1
+                        rec_ids = [r.get('track_id') for r in recommendations]
+                        if rec_ids and rec_ids[0] == gt_track_id:
+                            hits_at_1 += 1
+                        if gt_track_id in rec_ids[:5]:
+                            hits_at_5 += 1
+                        if gt_track_id in rec_ids[:10]:
+                            hits_at_10 += 1
+
+                # Always use ground truth item for history to avoid error accumulation
+                user_history.append(item)
+
                 if pbar:
                     pbar.update(1)
                 step += 1
-        
+
         if pbar:
             pbar.close()
-        
-        metrics = self._compute_metrics_comprehensive(user_history, eval_items, split_type)
-        
+
+        metrics = self._compute_metrics_comprehensive(all_recommendations, eval_items, split_type)
+
+        # Inject per-query hit-rates (these are the real recommendation accuracy metrics)
+        if n_queries > 0:
+            metrics['hit_rate@1'] = hits_at_1 / n_queries
+            metrics['hit_rate@5'] = hits_at_5 / n_queries
+            metrics['hit_rate@10'] = hits_at_10 / n_queries
+
         for key, value in metrics.items():
             if split_type == SplitType.VALIDATION:
                 self.training_history['val_metrics'][key].append(value)
             elif split_type == SplitType.TEST:
                 self.training_history['test_metrics'][key].append(value)
-        
+
         self.actor.train()
         self.critic.train()
-        
+
         return metrics
 
     def _compute_metrics(self, recommendations: List[Dict], 
@@ -1040,48 +1097,77 @@ class RecommenderTrainer:
         
         return metrics
     
-    def train(self, num_epochs: int, epsilon_start: float = 0.9, 
+    def train(self, num_epochs: int, epsilon_start: float = 0.9,
              epsilon_end: float = 0.1, epsilon_decay: float = 0.995,
-             eval_freq: int = 1, save_path: Optional[str] = None, print_logs: bool = True) -> Dict:
+             eval_freq: int = 1, save_path: Optional[str] = None,
+             print_logs: bool = True, push_url: Optional[str] = None) -> Dict:
         print(f"Starting training for {num_epochs} epochs in {self.device}...")
         epsilon = epsilon_start
-        
+
         if not print_logs:
             pbar_t = tqdm(total=num_epochs, desc="Training Epochs")
         else:
             pbar_t = None
-            
+
         for epoch in range(num_epochs):
             if print_logs:
                 print(f"\n{'='*50}")
                 print(f"Epoch {epoch+1}/{num_epochs}")
                 print(f"{'='*50}")
-            
+
+            _q_start = len(self.training_history['q_stats'])
             train_metrics = self.train_epoch(epsilon=epsilon, print_logs=print_logs)
 
             if print_logs:
                 print(f"Train Metrics:")
                 for key, value in train_metrics.items():
                     print(f"  {key}: {value:.4f}")
-            
+
+            val_metrics: Dict = {}
+            test_metrics: Dict = {}
             if (epoch + 1) % eval_freq == 0:
                 val_metrics = self.evaluate(SplitType.VALIDATION)
                 if print_logs:
                     print(f"\nValidation Metrics:")
                     for key, value in val_metrics.items():
                         print(f"  {key}: {value:.4f}")
-                
+
                 test_metrics = self.evaluate(SplitType.TEST)
                 if print_logs:
                     print(f"\nTest Metrics:")
                     for key, value in test_metrics.items():
                         print(f"  {key}: {value:.4f}")
-            
+
             epsilon = max(epsilon_end, epsilon * epsilon_decay)
-            
+
+            # Push epoch data to monitoring backend (never breaks training on failure)
+            if push_url:
+                try:
+                    import requests as _req
+                    _epoch_q = self.training_history['q_stats'][_q_start:]
+                    _q_agg = {
+                        'target_mean': float(np.mean([s['target_mean'] for s in _epoch_q])) if _epoch_q else None,
+                        'q1_mean': float(np.mean([s['q1_mean'] for s in _epoch_q])) if _epoch_q else None,
+                    }
+                    _payload = {
+                        'epoch': epoch + 1,
+                        'total_epochs': num_epochs,
+                        'epsilon': float(epsilon),
+                        'train': {k: float(v) if isinstance(v, (int, float)) else v
+                                  for k, v in train_metrics.items()},
+                        'val': {k: float(v) if isinstance(v, (int, float)) else v
+                                for k, v in val_metrics.items()} if val_metrics else None,
+                        'test': {k: float(v) if isinstance(v, (int, float)) else v
+                                 for k, v in test_metrics.items()} if test_metrics else None,
+                        'q_stats': _q_agg,
+                    }
+                    _req.post(push_url, json=_payload, timeout=3)
+                except Exception:
+                    pass  # monitoring must never interrupt training
+
             # if save_path and (epoch + 1) % 10 == 0:
             #     self.save_model(f"{save_path}_epoch_{epoch+1}.pt")
-            
+
             if pbar_t:
                 pbar_t.update(1)
 
